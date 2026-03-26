@@ -1,0 +1,29 @@
+all:
+  tool:
+    - "gcfr_*"
+
+ops:
+  tool:
+    - "gcfr_stream_*"
+    - "gcfr_current_*"
+    - "gcfr_process_*"
+    - "gcfr_failed_*"
+    - "gcfr_error_*"
+    - "gcfr_load_status"
+    - "gcfr_health_check"
+
+performance:
+  tool:
+    - "gcfr_sla_*"
+    - "gcfr_top_*"
+    - "gcfr_data_trend_*"
+    - "gcfr_stream_status"
+    - "gcfr_health_check"
+
+lineage:
+  tool:
+    - "gcfr_data_lineage"
+    - "gcfr_dataset_registered"
+    - "gcfr_load_stats"
+    - "gcfr_transform_stats"
+    - "gcfr_health_check"

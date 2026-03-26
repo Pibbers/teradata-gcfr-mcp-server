@@ -1,0 +1,12 @@
+services:
+  gcfr-mcp:
+    build: .
+    ports:
+      - "8001:8001"
+    env_file: .env
+    environment:
+      MCP_TRANSPORT: streamable-http
+      MCP_PORT: "8001"
+    restart: unless-stopped
+    volumes:
+      - ./gcfr_custom_tools.yml:/app/gcfr_custom_tools.yml:ro

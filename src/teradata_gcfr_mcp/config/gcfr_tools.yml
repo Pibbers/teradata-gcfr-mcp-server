@@ -1,0 +1,13 @@
+# Example custom tools file.
+# Place a file matching *_tools.yml in CONFIG_DIR to register site-specific
+# read-only query tools without writing Python.
+#
+# Supported placeholders in sql:
+#   {gcfr_view_db}  — expands to GCFR_VIEW_DB setting  (e.g. GDEV1V_GCFR)
+#   {gcfr_opr_db}   — expands to GCFR_OPR_DB  setting  (e.g. GDEV1V_OPR)
+#   {gcfr_utlfw_db} — expands to GCFR_UTLFW_DB setting (e.g. GDEV1V_UTLFW)
+
+tools:
+  - name: gcfr_my_site_report
+    description: "Example custom tool — replace with your own site-specific query"
+    sql: "SELECT TOP 10 * FROM {gcfr_opr_db}.GCFR_RV_Stream ORDER BY Business_Date DESC"

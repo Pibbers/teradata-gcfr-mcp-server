@@ -228,6 +228,16 @@ s = Settings(DATABASE_URI="teradata://user:pass@localhost:1025/db")
 `TDConnectionPool.__init__` only stores settings; it does not connect.
 The connection is lazy — safe to create in unit tests.
 
+### Patching the connection pool in db tests
+
+The pool now uses `_open()` (returns a connection object) instead of the old
+`_connect()` (set `self._conn`).  Patch `_open` to inject a mock connection:
+
+```python
+mocker.patch.object(pool, "_open", return_value=mock_conn)   # success path
+mocker.patch.object(pool, "_open", side_effect=SomeError())  # failure path
+```
+
 ### pytest-asyncio
 
 Configured with `asyncio_mode = "auto"` in `pyproject.toml` — no `@pytest.mark.asyncio`
@@ -235,10 +245,9 @@ decorator needed on async test functions.
 
 ---
 
-## Pending work (as of 2026-03-26)
+## Pending work (as of 2026-03-27)
 
 - `tests/integration/` — live connection tests against GDEV1
 - `tests/run_mcp_tests.py` — MCP protocol smoke tests
 - `Dockerfile` + `docker-compose.yml`
-- Full `README.md`
-- Profile filtering for YAML-loaded custom tools (currently they bypass the filter)
+- Fix `Elapsed_Seconds` column in `transforms.py`: `GCFR_RV_LongestRunProcess` and `GCFR_RV_LongestRunStream` do not have this column — run `SHOW VIEW` against GDEV1 to find the actual elapsed-time column name, then fix `_handle_top_slowest_processes` and `_handle_top_slowest_streams`

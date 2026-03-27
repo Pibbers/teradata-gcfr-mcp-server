@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -131,7 +132,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         99=complete.  Use this to find stuck or long-running processes.
         Filter by stream_key and/or process_name to narrow results.
         """
-        return _handle_current_process_status(pool, settings, stream_key, process_name)
+        return await asyncio.to_thread(
+            _handle_current_process_status, pool, settings, stream_key, process_name
+        )
 
     @mcp.tool()
     async def gcfr_process_history(
@@ -147,7 +150,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_process_history(pool, settings, eff_from, eff_to, process_name)
+        return await asyncio.to_thread(
+            _handle_process_history, pool, settings, eff_from, eff_to, process_name
+        )
 
     @mcp.tool()
     async def gcfr_process_status_summary(
@@ -160,4 +165,6 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Defaults to today when business_date is not supplied.
         """
         eff_date = business_date or date.today().isoformat()
-        return _handle_process_status_summary(pool, settings, eff_date)
+        return await asyncio.to_thread(
+            _handle_process_status_summary, pool, settings, eff_date
+        )

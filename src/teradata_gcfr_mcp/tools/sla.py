@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -102,7 +103,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_sla_process_report(pool, settings, eff_from, eff_to)
+        return await asyncio.to_thread(
+            _handle_sla_process_report, pool, settings, eff_from, eff_to
+        )
 
     @mcp.tool()
     async def gcfr_sla_stream_report(
@@ -116,4 +119,6 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_sla_stream_report(pool, settings, eff_from, eff_to)
+        return await asyncio.to_thread(
+            _handle_sla_stream_report, pool, settings, eff_from, eff_to
+        )

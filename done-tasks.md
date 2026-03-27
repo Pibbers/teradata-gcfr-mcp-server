@@ -4,6 +4,43 @@ Completed work log. Most-recent entries first.
 
 ---
 
+## 2026-03-27 — Phase 5: gap analysis improvements (asyncio.to_thread, real pool, QueryBand, transport-aware logging, YAML profile filter test)
+
+**Files modified:**
+
+- `src/teradata_gcfr_mcp/db.py` — complete rewrite; `TDConnectionPool` now uses `queue.Queue` + `threading.Lock` for thread safety; lazy `_open()` replaces `_connect()`; QueryBand set on every new connection; `get_connection()` context manager discards connections on exception; overflow connections closed after use; `invalidate()` drains idle queue
+- `src/teradata_gcfr_mcp/server.py` — replaced `logging.basicConfig` with `_configure_logging()`; stdio transport → rotating file only; HTTP/SSE → stderr + rotating file
+- `src/teradata_gcfr_mcp/tools/streams.py` — added `asyncio.to_thread` wrapping in all three tool handlers
+- `src/teradata_gcfr_mcp/tools/processes.py` — same
+- `src/teradata_gcfr_mcp/tools/loads.py` — same
+- `src/teradata_gcfr_mcp/tools/transforms.py` — same
+- `src/teradata_gcfr_mcp/tools/errors.py` — same
+- `src/teradata_gcfr_mcp/tools/sla.py` — same
+- `src/teradata_gcfr_mcp/tools/lineage.py` — same
+- `src/teradata_gcfr_mcp/tool_loader.py` — `_make_tool_fn` updated to use `asyncio.to_thread`
+- `tests/unit/test_db.py` — rewritten: `_connect` → `_open`; `_mock_conn(captured)` helper captures SQL; `test_open_sets_query_band` added; pool `get_connection()` used as context manager
+- `tests/unit/test_tool_loader.py` — added `test_yaml_tools_subject_to_profile_filter` regression test
+- `CLAUDE.md` — updated "Patching the connection pool in db tests" section; removed stale profile-filtering pending item
+
+**Tasks:**
+
+1. **asyncio.to_thread**: Every `_handle_*` call in all 7 tool modules now runs in a thread pool via `await asyncio.to_thread(...)` to avoid blocking the MCP event loop.
+2. **Real connection pool**: Replaced single `self._conn` with a `queue.Queue`-based pool supporting `TD_POOL_SIZE` persistent connections + `TD_MAX_OVERFLOW` burst connections. Connections are discarded (not returned) on exception. `TD_POOL_TIMEOUT` gates callers waiting for a free slot.
+3. **QueryBand**: `_open()` executes `SET QUERY_BAND = 'ApplicationName=teradata-gcfr-mcp;UtilityName=MCP;' FOR SESSION` on every new connection for Teradata workload-management attribution.
+4. **Transport-aware logging**: stdio mode writes to rotating file only (stdout is the MCP wire); HTTP/SSE modes write to both stderr and the rotating file. Log: `teradata-gcfr-mcp.log`, max 10 MiB, 3 backups.
+5. **YAML profile filter regression test**: Confirmed YAML-loaded custom tools are pruned by `_apply_profile_filter()` (load-then-filter ordering in `main()` already correct); locked in with `test_yaml_tools_subject_to_profile_filter`.
+
+**Live smoke tests run against GDEV1 (192.168.1.198):**
+
+- 21 tools registered; `health_check` returned ok
+- Reconnect-once pattern fired on first attempt, retried successfully (logged as WARNING in `teradata-gcfr-mcp.log`)
+- Pool reuse confirmed: second query 395 ms vs first 807 ms
+- Pre-existing schema issue discovered (not caused by these changes): `gcfr_top_slowest_processes` / `gcfr_top_slowest_streams` fail with `Column Elapsed_Seconds not found in GDEV1V_OPR.GCFR_RV_LongestRunProcess`
+
+**Verification gate result:** `ruff check src/` ✓ · `mypy src/` ✓ · `pytest tests/unit/ -v` 84/84 ✓
+
+---
+
 ## 2026-03-26 — Phase 4: SLA, lineage, health check, custom tool loader, profile filtering
 
 **Files created / modified:**

@@ -154,9 +154,8 @@ inside the function body.
 ## Remaining work
 
 See CLAUDE.md § "Pending work". Priority order:
+
 1. Integration tests (`tests/integration/`) — requires GDEV1 network access
 2. MCP smoke tests (`tests/run_mcp_tests.py`)
 3. Dockerfile + docker-compose.yml
-4. Full README.md
-5. Profile filtering for custom YAML tools (currently they always register
-   regardless of active profile)
+4. Fix `Elapsed_Seconds` column name in `transforms.py` `_handle_top_slowest_*` — actual column name in `GCFR_RV_LongestRunProcess` and `GCFR_RV_LongestRunStream` differs; run `SHOW VIEW` to confirm correct name

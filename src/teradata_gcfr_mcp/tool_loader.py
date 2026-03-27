@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,9 @@ def _make_tool_fn(pool: TDConnectionPool, sql: str, settings: Settings) -> Any:
     """Return a zero-argument async function that executes *sql*."""
 
     async def _execute() -> list[dict[str, Any]]:
-        return execute_query(pool, sql, max_rows=settings.GCFR_MAX_ROWS)
+        return await asyncio.to_thread(
+            execute_query, pool, sql, max_rows=settings.GCFR_MAX_ROWS
+        )
 
     return _execute
 

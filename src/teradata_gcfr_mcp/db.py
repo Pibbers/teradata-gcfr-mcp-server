@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import queue
 import re
+import threading
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
@@ -14,6 +16,9 @@ import teradatasql
 from teradata_gcfr_mcp.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# QueryBand set on every new connection for Teradata workload-management attribution.
+_QUERY_BAND = "ApplicationName=teradata-gcfr-mcp;UtilityName=MCP;"
 
 
 # ---------------------------------------------------------------------------
@@ -37,35 +42,49 @@ def rows_to_json(cursor: Any) -> list[dict[str, Any]]:
 
 
 class TDConnectionPool:
-    """Manages a single persistent Teradata connection with lazy init.
+    """Thread-safe Teradata connection pool.
 
-    The connection is not opened until the first :meth:`get_connection` call.
-    On detected staleness the caller can :meth:`invalidate` the connection so
-    the next ``get_connection`` transparently reconnects.
+    Maintains up to ``TD_POOL_SIZE`` idle connections.  Under burst load up to
+    ``TD_POOL_SIZE + TD_MAX_OVERFLOW`` connections may exist simultaneously.
+    If all connections are busy the caller blocks for up to ``TD_POOL_TIMEOUT``
+    seconds before a :exc:`TimeoutError` is raised.
+
+    Connections are opened lazily on first use.  Every new connection has
+    ``QUERY_BAND`` set for Teradata workload-management attribution.
     """
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._conn: Any = None
+        self._idle: queue.Queue[Any] = queue.Queue()
+        self._total = 0
+        self._max_size = settings.TD_POOL_SIZE + settings.TD_MAX_OVERFLOW
+        self._lock = threading.Lock()
+        self._timeout = float(settings.TD_POOL_TIMEOUT)
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _connect(self) -> None:
-        """(Re)open a connection using ``DATABASE_URI`` from settings."""
+    def _open(self) -> Any:
+        """Open and return a new Teradata connection with QueryBand set."""
         parsed = urlparse(self._settings.DATABASE_URI)
-        host: str = parsed.hostname or ""
-        user: str = parsed.username or ""
-        password: str = parsed.password or ""
-
-        self._conn = teradatasql.connect(  # type: ignore[no-untyped-call]
-            host=host,
-            user=user,
-            password=password,
+        conn = teradatasql.connect(  # type: ignore[no-untyped-call]
+            host=parsed.hostname or "",
+            user=parsed.username or "",
+            password=parsed.password or "",
             logmech=self._settings.LOGMECH,
         )
-        logger.debug("Teradata connection established  host=%s user=%s", host, user)
+        cur = conn.cursor()  # type: ignore[no-untyped-call]
+        try:
+            cur.execute(f"SET QUERY_BAND = '{_QUERY_BAND}' FOR SESSION")
+        finally:
+            cur.close()
+        logger.debug(
+            "Teradata connection opened  host=%s user=%s",
+            parsed.hostname,
+            parsed.username,
+        )
+        return conn
 
     # ------------------------------------------------------------------
     # Public API
@@ -73,28 +92,91 @@ class TDConnectionPool:
 
     @contextmanager
     def get_connection(self) -> Generator[Any, None, None]:
-        """Yield a live Teradata connection, connecting lazily on first use."""
-        if self._conn is None:
-            self._connect()
-        yield self._conn
+        """Yield a live Teradata connection from the pool.
+
+        The connection is returned to the idle pool when the ``with`` block
+        exits normally.  On exception the connection is discarded so a
+        potentially broken connection is never reused.
+        """
+        conn: Any = None
+
+        # 1. Try to grab an idle connection without blocking.
+        try:
+            conn = self._idle.get_nowait()
+        except queue.Empty:
+            pass
+
+        # 2. No idle connection — create one if under the size limit.
+        if conn is None:
+            with self._lock:
+                if self._total < self._max_size:
+                    self._total += 1
+                    should_create = True
+                else:
+                    should_create = False
+
+            if should_create:
+                try:
+                    conn = self._open()
+                except Exception:
+                    with self._lock:
+                        self._total -= 1
+                    raise
+            else:
+                # 3. Pool saturated — wait for a connection to be returned.
+                try:
+                    conn = self._idle.get(timeout=self._timeout)
+                except queue.Empty:
+                    raise TimeoutError(
+                        f"No Teradata connection available after {self._timeout:.0f}s"
+                    ) from None
+
+        healthy = False
+        try:
+            yield conn
+            healthy = True
+        finally:
+            if healthy:
+                # Return to idle pool; discard overflow connections after use.
+                try:
+                    self._idle.put_nowait(conn)
+                except queue.Full:
+                    with self._lock:
+                        self._total -= 1
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+            else:
+                # Connection may be broken — discard it.
+                with self._lock:
+                    self._total -= 1
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def invalidate(self) -> None:
-        """Discard the cached connection without closing it.
+        """Drain all idle connections.
 
-        Use this when the connection is already known to be dead so the next
-        :meth:`get_connection` call will transparently reconnect.
+        Call this when a query fails to clear potentially stale connections
+        so the next acquisition opens fresh ones.
         """
-        self._conn = None
+        while True:
+            try:
+                conn = self._idle.get_nowait()
+                with self._lock:
+                    self._total -= 1
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            except queue.Empty:
+                break
 
     def close(self) -> None:
-        """Close the underlying connection if one is open."""
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                self._conn = None
+        """Drain and close all idle connections."""
+        self.invalidate()
 
 
 # ---------------------------------------------------------------------------
@@ -116,9 +198,9 @@ def execute_query(
       contain ``SELECT TOP``, a ``TOP N`` clause is injected immediately after
       the first ``SELECT`` keyword.  The integer is embedded directly (not as a
       bind parameter) because Teradata does not allow parametrised TOP values.
-    * **Reconnect once** – on the first failure the connection is invalidated
-      and the query is retried once.  This transparently handles stale/dropped
-      connections without surfacing transient errors to callers.
+    * **Reconnect once** – on the first failure the connection is discarded and
+      ``invalidate()`` drains stale idle connections, then the query is retried
+      once with a fresh connection.
     * **Never raises** – any remaining exception after the retry is caught and
       returned as ``[{"error": "...", "sql": "..."}]`` so the MCP tool can
       surface a helpful message to Claude instead of crashing the server.
@@ -129,7 +211,7 @@ def execute_query(
     placeholders).  Schema and table names come from ``config.py`` constants,
     never from user input, so f-string interpolation of those is safe.
     """
-    # Inject TOP clause when a row limit is requested
+    # Inject TOP clause when a row limit is requested.
     if max_rows is not None and not re.search(r"(?i)\bSELECT\s+TOP\b", sql):
         sql = re.sub(r"(?i)\bSELECT\b", f"SELECT TOP {max_rows}", sql, count=1)
 
@@ -153,11 +235,10 @@ def execute_query(
             last_exc = exc
             if attempt == 0:
                 logger.warning(
-                    "Query attempt 1 failed (%s); invalidating connection and retrying.",
+                    "Query attempt 1 failed (%s); invalidating pool and retrying.",
                     type(exc).__name__,
                 )
                 pool.invalidate()
-            # Second failure falls through to the error return below
 
     error_msg = str(last_exc) if last_exc is not None else "Unknown error"
     return [{"error": error_msg, "sql": sql}]

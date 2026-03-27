@@ -2,10 +2,42 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import teradatasql  # type: ignore[import-untyped]
+
+from teradata_gcfr_mcp.config import Settings
+from teradata_gcfr_mcp.db import TDConnectionPool, execute_query, rows_to_json
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _pool() -> TDConnectionPool:
+    return TDConnectionPool(
+        Settings(DATABASE_URI="teradata://user:pass@localhost:1025/db")
+    )
+
+
+def _mock_conn(captured: list[str] | None = None) -> MagicMock:
+    """Return a mock Teradata connection whose cursor captures executed SQL."""
+    mock_cur = MagicMock()
+    mock_cur.description = [("Process_Name",)]
+    mock_cur.fetchall.return_value = []
+
+    if captured is not None:
+
+        def _capture(sql: str, *args: object) -> None:
+            captured.append(sql)
+
+        mock_cur.execute.side_effect = _capture
+
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = mock_cur
+    return mock_conn
 
 
 # ---------------------------------------------------------------------------
@@ -15,8 +47,6 @@ import teradatasql  # type: ignore[import-untyped]
 
 def test_rows_to_json_normal() -> None:
     """Cursor with real GCFR column names produces correct list-of-dicts."""
-    from teradata_gcfr_mcp.db import rows_to_json
-
     cursor = MagicMock()
     cursor.description = [
         ("Process_Name",),
@@ -44,8 +74,6 @@ def test_rows_to_json_normal() -> None:
 
 def test_rows_to_json_empty() -> None:
     """Empty fetchall returns an empty list without error."""
-    from teradata_gcfr_mcp.db import rows_to_json
-
     cursor = MagicMock()
     cursor.description = [("Rows_Input",), ("Rows_Inserted",), ("Rows_Rejected",)]
     cursor.fetchall.return_value = []
@@ -56,96 +84,78 @@ def test_rows_to_json_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# TDConnectionPool — _open sets QueryBand
+# ---------------------------------------------------------------------------
+
+
+def test_open_sets_query_band(mocker: MagicMock) -> None:
+    """_open() issues SET QUERY_BAND on every new connection."""
+    pool = _pool()
+    executed: list[str] = []
+    mock_conn = _mock_conn(executed)
+
+    mocker.patch("teradatasql.connect", return_value=mock_conn)
+
+    conn = pool._open()
+
+    assert conn is mock_conn
+    assert any("SET QUERY_BAND" in s for s in executed), (
+        "QueryBand was not set on new connection"
+    )
+
+
+# ---------------------------------------------------------------------------
 # execute_query
 # ---------------------------------------------------------------------------
 
 
-def test_execute_query_returns_error_dict_on_connection_failure(mocker: MagicMock) -> None:
-    """When the pool cannot connect, execute_query returns an error dict, not an exception."""
-    from teradata_gcfr_mcp.config import Settings
-    from teradata_gcfr_mcp.db import TDConnectionPool, execute_query
+def test_execute_query_returns_error_dict_on_connection_failure(
+    mocker: MagicMock,
+) -> None:
+    """When the pool cannot open a connection, execute_query returns an error dict."""
+    pool = _pool()
 
-    settings = Settings(DATABASE_URI="teradata://user:pass@localhost:1025/db")
-    pool = TDConnectionPool(settings)
-
-    # Simulate a persistent connection failure (both attempts will fail)
     mocker.patch.object(
         pool,
-        "_connect",
+        "_open",
         side_effect=teradatasql.OperationalError("Connection refused by host"),
     )
 
-    sql = "SELECT TOP 10 * FROM GDEV1V_OPR.GCFR_RV_Stream"
-    result = execute_query(pool, sql)
+    result = execute_query(pool, "SELECT TOP 10 * FROM GDEV1V_OPR.GCFR_RV_Stream")
 
     assert isinstance(result, list)
     assert len(result) == 1
-    error_row = result[0]
-    assert "error" in error_row
-    assert "sql" in error_row
-    assert "Connection refused" in str(error_row["error"])
+    assert "error" in result[0]
+    assert "sql" in result[0]
+    assert "Connection refused" in str(result[0]["error"])
 
 
-def test_execute_query_injects_top_clause() -> None:
+def test_execute_query_injects_top_clause(mocker: MagicMock) -> None:
     """max_rows injects TOP N into the SQL when not already present."""
-    from teradata_gcfr_mcp.config import Settings
-    from teradata_gcfr_mcp.db import TDConnectionPool, execute_query
-
-    settings = Settings(DATABASE_URI="teradata://user:pass@localhost:1025/db")
-    pool = TDConnectionPool(settings)
-
+    pool = _pool()
     captured: list[str] = []
+    mocker.patch.object(pool, "_open", return_value=_mock_conn(captured))
 
-    # Intercept the execute call to see the rewritten SQL
-    def fake_connect() -> None:
-        mock_cur = MagicMock()
-        mock_cur.description = [("Process_Name",)]
-        mock_cur.fetchall.return_value = []
-
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cur
-
-        def fake_execute(sql: str, *args: object) -> None:
-            captured.append(sql)
-
-        mock_cur.execute.side_effect = fake_execute
-        pool._conn = mock_conn
-
-    pool._connect = fake_connect  # type: ignore[method-assign]
     execute_query(pool, "SELECT * FROM GDEV1V_OPR.GCFR_RV_Stream", max_rows=25)
 
     assert captured, "execute was not called"
-    assert "TOP 25" in captured[0]
+    assert any("TOP 25" in s for s in captured)
 
 
-def test_execute_query_does_not_duplicate_top_clause() -> None:
+def test_execute_query_does_not_duplicate_top_clause(mocker: MagicMock) -> None:
     """If SQL already contains SELECT TOP, max_rows does not inject a second one."""
-    from teradata_gcfr_mcp.config import Settings
-    from teradata_gcfr_mcp.db import TDConnectionPool, execute_query
-
-    settings = Settings(DATABASE_URI="teradata://user:pass@localhost:1025/db")
-    pool = TDConnectionPool(settings)
-
+    pool = _pool()
     captured: list[str] = []
+    mocker.patch.object(pool, "_open", return_value=_mock_conn(captured))
 
-    def fake_connect() -> None:
-        mock_cur = MagicMock()
-        mock_cur.description = [("Process_Name",)]
-        mock_cur.fetchall.return_value = []
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cur
-
-        def fake_execute(sql: str, *args: object) -> None:
-            captured.append(sql)
-
-        mock_cur.execute.side_effect = fake_execute
-        pool._conn = mock_conn
-
-    pool._connect = fake_connect  # type: ignore[method-assign]
-    execute_query(pool, "SELECT TOP 5 * FROM GDEV1V_OPR.GCFR_RV_Stream", max_rows=500)
+    execute_query(
+        pool, "SELECT TOP 5 * FROM GDEV1V_OPR.GCFR_RV_Stream", max_rows=500
+    )
 
     assert captured
-    assert captured[0].upper().count("TOP") == 1
+    assert sum(1 for s in captured if "TOP" in s.upper() and "TOP 5" in s) >= 1
+    # No second TOP should have been injected
+    assert not any(s.upper().count("TOP") > 1 for s in captured)
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +166,9 @@ def test_execute_query_does_not_duplicate_top_clause() -> None:
 def test_get_pool_singleton() -> None:
     """get_pool returns the same object on repeated calls."""
     import teradata_gcfr_mcp.db as db_module
-    from teradata_gcfr_mcp.config import Settings
     from teradata_gcfr_mcp.db import get_pool
 
-    # Reset singleton so this test is self-contained
+    # Reset singleton so this test is self-contained.
     db_module._pool = None
 
     settings = Settings(DATABASE_URI="teradata://user:pass@localhost:1025/db")
@@ -168,5 +177,5 @@ def test_get_pool_singleton() -> None:
 
     assert pool_a is pool_b
 
-    # Restore clean state for any subsequent tests
+    # Restore clean state for any subsequent tests.
     db_module._pool = None

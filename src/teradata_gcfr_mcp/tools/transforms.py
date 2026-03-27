@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -204,7 +205,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_transform_stats(pool, settings, eff_from, eff_to, ctl_id)
+        return await asyncio.to_thread(
+            _handle_transform_stats, pool, settings, eff_from, eff_to, ctl_id
+        )
 
     @mcp.tool()
     async def gcfr_top_slowest_processes(
@@ -218,7 +221,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Defaults to today when business_date is not supplied.
         """
         eff_date = business_date or date.today().isoformat()
-        return _handle_top_slowest_processes(pool, settings, eff_date, top_n)
+        return await asyncio.to_thread(
+            _handle_top_slowest_processes, pool, settings, eff_date, top_n
+        )
 
     @mcp.tool()
     async def gcfr_top_slowest_streams(
@@ -231,7 +236,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Defaults to today when business_date is not supplied.
         """
         eff_date = business_date or date.today().isoformat()
-        return _handle_top_slowest_streams(pool, settings, eff_date, top_n)
+        return await asyncio.to_thread(
+            _handle_top_slowest_streams, pool, settings, eff_date, top_n
+        )
 
     @mcp.tool()
     async def gcfr_data_trend_loads(
@@ -245,7 +252,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_data_trend_loads(pool, settings, eff_from, eff_to)
+        return await asyncio.to_thread(
+            _handle_data_trend_loads, pool, settings, eff_from, eff_to
+        )
 
     @mcp.tool()
     async def gcfr_data_trend_transforms(
@@ -258,4 +267,6 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_data_trend_transforms(pool, settings, eff_from, eff_to)
+        return await asyncio.to_thread(
+            _handle_data_trend_transforms, pool, settings, eff_from, eff_to
+        )

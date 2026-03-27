@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -170,8 +171,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_failed_processes(
-            pool, settings, eff_from, eff_to, stream_key, process_name
+        return await asyncio.to_thread(
+            _handle_failed_processes,
+            pool, settings, eff_from, eff_to, stream_key, process_name,
         )
 
     @mcp.tool()
@@ -189,7 +191,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_error_log(pool, settings, eff_from, eff_to, process_name)
+        return await asyncio.to_thread(
+            _handle_error_log, pool, settings, eff_from, eff_to, process_name
+        )
 
     @mcp.tool()
     async def gcfr_execution_log(
@@ -207,6 +211,7 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_execution_log(
-            pool, settings, eff_from, eff_to, process_name, stream_key
+        return await asyncio.to_thread(
+            _handle_execution_log,
+            pool, settings, eff_from, eff_to, process_name, stream_key,
         )

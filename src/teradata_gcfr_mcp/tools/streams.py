@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -121,7 +122,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_stream_status(pool, settings, stream_key, eff_from, eff_to)
+        return await asyncio.to_thread(
+            _handle_stream_status, pool, settings, stream_key, eff_from, eff_to
+        )
 
     @mcp.tool()
     async def gcfr_current_stream_status(
@@ -132,7 +135,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Use this first when investigating a running or stuck batch.
         Optionally filter to a specific stream by providing stream_key.
         """
-        return _handle_current_stream_status(pool, settings, stream_key)
+        return await asyncio.to_thread(
+            _handle_current_stream_status, pool, settings, stream_key
+        )
 
     @mcp.tool()
     async def gcfr_stream_business_date(
@@ -143,4 +148,6 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Use this to understand where a stream's processing date is set and
         whether it is in sync with the expected calendar date.
         """
-        return _handle_stream_business_date(pool, settings, stream_key)
+        return await asyncio.to_thread(
+            _handle_stream_business_date, pool, settings, stream_key
+        )

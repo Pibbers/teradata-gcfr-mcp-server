@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from datetime import date
@@ -112,7 +113,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Defaults to today when business_date is not supplied.
         """
         eff_date = business_date or date.today().isoformat()
-        return _handle_data_lineage(pool, settings, target_table, eff_date)
+        return await asyncio.to_thread(
+            _handle_data_lineage, pool, settings, target_table, eff_date
+        )
 
     @mcp.tool()
     async def gcfr_health_check() -> list[dict[str, Any]]:
@@ -121,4 +124,4 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Run this first if tools are returning errors.
         Returns status, database names, stream_count, and response_time_ms.
         """
-        return _handle_health_check(pool, settings)
+        return await asyncio.to_thread(_handle_health_check, pool, settings)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import logging
+import logging.handlers
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,44 @@ mcp: FastMCP = FastMCP("teradata-gcfr-mcp-server")
 
 # Profiles file shipped alongside this module.
 _PROFILES_PATH = Path(__file__).parent / "config" / "profiles.yml"
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+_LOG_FMT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+_LOG_FILE = "teradata-gcfr-mcp.log"
+_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB
+_LOG_BACKUP_COUNT = 3
+
+
+def _configure_logging(level_str: str, transport: str) -> None:
+    """Set up logging with transport-aware handlers.
+
+    * **stdio** – logs go to a rotating file only.  stdout is the MCP wire
+      protocol; writing to stderr inside a stdio session creates noise for the
+      MCP client.
+    * **sse / streamable-http** – logs go to both stderr (visible to the
+      operator) and the same rotating file.
+    """
+    level = getattr(logging, level_str.upper(), logging.WARNING)
+    fmt = logging.Formatter(_LOG_FMT)
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    if transport != "stdio":
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
+
+    fh = logging.handlers.RotatingFileHandler(
+        _LOG_FILE,
+        maxBytes=_LOG_MAX_BYTES,
+        backupCount=_LOG_BACKUP_COUNT,
+    )
+    fh.setFormatter(fmt)
+    root.addHandler(fh)
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +130,7 @@ def main() -> None:
 
     active_profile = args.profile or settings.PROFILE
 
-    logging.basicConfig(level=getattr(logging, settings.LOGGING_LEVEL, logging.WARNING))
+    _configure_logging(settings.LOGGING_LEVEL, settings.MCP_TRANSPORT)
 
     pool = get_pool(settings)
 

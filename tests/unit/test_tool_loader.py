@@ -9,6 +9,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from teradata_gcfr_mcp.config import Settings
+from teradata_gcfr_mcp.server import _apply_profile_filter
 from teradata_gcfr_mcp.tool_loader import _substitute_placeholders, load_custom_tools
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,45 @@ def test_missing_config_dir_returns_zero() -> None:
 # ---------------------------------------------------------------------------
 # test_placeholder_substitution
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# test_yaml_tools_subject_to_profile_filter
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_tools_subject_to_profile_filter(tmp_path: Path) -> None:
+    """YAML-loaded tools are removed by _apply_profile_filter when they do not
+    match the active profile's patterns.  This verifies that the load-then-filter
+    ordering in server.main() correctly covers custom tools."""
+    yaml_content = """\
+tools:
+  - name: gcfr_site_report
+    description: "Site-specific report"
+    sql: "SELECT * FROM {gcfr_opr_db}.GCFR_RV_Stream"
+"""
+    (tmp_path / "site_tools.yaml").write_text(yaml_content)
+
+    mcp_instance = FastMCP("test")
+    s = _settings(CONFIG_DIR=str(tmp_path))
+
+    with patch("teradata_gcfr_mcp.tool_loader.get_pool") as mock_gp:
+        mock_gp.return_value = MagicMock()
+        load_custom_tools(mcp_instance, s)
+
+    # Confirm the tool is registered before filtering.
+    mgr = getattr(mcp_instance, "_tool_manager", None)
+    assert mgr is not None
+    tools_before = set(getattr(mgr, "_tools", {}).keys())
+    assert "gcfr_site_report" in tools_before
+
+    # Apply a profile that does NOT match gcfr_site_report.
+    _apply_profile_filter(mcp_instance, ["gcfr_stream_*", "gcfr_health_check"])
+
+    tools_after = set(getattr(mgr, "_tools", {}).keys())
+    assert "gcfr_site_report" not in tools_after, (
+        "YAML tool was not removed by profile filter"
+    )
 
 
 @pytest.mark.parametrize(

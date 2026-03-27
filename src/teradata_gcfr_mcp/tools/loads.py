@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import date, timedelta
 from typing import Any
@@ -158,7 +159,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_load_stats(pool, settings, eff_from, eff_to, ctl_id)
+        return await asyncio.to_thread(
+            _handle_load_stats, pool, settings, eff_from, eff_to, ctl_id
+        )
 
     @mcp.tool()
     async def gcfr_load_status(
@@ -172,7 +175,9 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         Optionally filter by ctl_id.
         """
         eff_date = business_date or date.today().isoformat()
-        return _handle_load_status(pool, settings, eff_date, ctl_id)
+        return await asyncio.to_thread(
+            _handle_load_status, pool, settings, eff_date, ctl_id
+        )
 
     @mcp.tool()
     async def gcfr_dataset_registered(
@@ -188,4 +193,6 @@ def register(mcp: FastMCP, pool: TDConnectionPool, settings: Settings) -> None:
         """
         eff_from = date_from or (date.today() - timedelta(days=1)).isoformat()
         eff_to = date_to or date.today().isoformat()
-        return _handle_dataset_registered(pool, settings, eff_from, eff_to, ctl_id)
+        return await asyncio.to_thread(
+            _handle_dataset_registered, pool, settings, eff_from, eff_to, ctl_id
+        )

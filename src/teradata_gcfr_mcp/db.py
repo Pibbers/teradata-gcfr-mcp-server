@@ -73,6 +73,7 @@ class TDConnectionPool:
             user=parsed.username or "",
             password=parsed.password or "",
             logmech=self._settings.LOGMECH,
+            timeout=self._settings.GCFR_QUERY_TIMEOUT,
         )
         cur = conn.cursor()  # type: ignore[no-untyped-call]
         try:

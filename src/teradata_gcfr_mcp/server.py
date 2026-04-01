@@ -153,7 +153,10 @@ def main() -> None:
         patterns = _load_profile_patterns(active_profile)
         _apply_profile_filter(mcp, patterns)
 
-    mcp.run(transport=settings.MCP_TRANSPORT)
+    mcp.run(
+        transport=settings.MCP_TRANSPORT,
+        mount_path=settings.MCP_PATH,
+    )
 
 
 if __name__ == "__main__":

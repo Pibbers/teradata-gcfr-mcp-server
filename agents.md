@@ -149,13 +149,86 @@ Since `register()` is called at startup, a default of `date.today()` freezes to
 the startup date. Always use `str | None = None` and compute `date.today()`
 inside the function body.
 
+### 6. `uvx teradata-gcfr-mcp-server` fails with "not found in package registry"
+
+`uvx` downloads tools from PyPI. This package is local-only and not published.
+**Fix:** always use `uv run teradata-gcfr-mcp-server`.
+
+### 8. Query timeout not enforced at connection level
+
+**Symptom:** Queries could hang indefinitely or run for hours.
+
+**Root cause:** `GCFR_QUERY_TIMEOUT` was defined in `config.py` but never passed to `teradatasql.connect()`.
+
+**Fix:** Added `timeout=self._settings.GCFR_QUERY_TIMEOUT` as a keyword argument to `teradatasql.connect()` in `db.py:_open()`.
+
+**Lesson:** Always verify that configuration settings are actually wired to their intended targets. A setting defined but unused is a common source of bugs.
+
+### 9. MCP mount path not passed to FastMCP
+
+**Symptom:** `MCP_PATH` config setting was present but HTTP transports ignored it; all servers mounted at `/` rather than `/mcp/`.
+
+**Root cause:** `server.py` called `mcp.run(transport=settings.MCP_TRANSPORT)` without the `mount_path` parameter.
+
+**Fix:** Changed to `mcp.run(transport=settings.MCP_TRANSPORT, mount_path=settings.MCP_PATH)`.
+
+**Note:** `MCP_HOST` and `MCP_PORT` cannot be passed to `mcp.run()` — these are FastMCP internal settings. Only `transport` and `mount_path` are configurable.
+
+### 10. FastMCP API not immediately clear from type hints
+
+**Symptom:** Attempted to pass `host=`, `port=`, `path=` to `mcp.run()`, but got type errors.
+
+**Root cause:** Did not check the actual method signature before making assumptions.
+
+**Fix:** Used `uv run python -c "import inspect; print(inspect.signature(FastMCP.run))"` to introspect the actual signature:
+```python
+(self, transport: Literal["stdio", "sse", "streamable-http"] = "stdio", mount_path: str | None = None) -> None
+```
+
+**Lesson:** When unsure about an API, introspect it directly rather than guessing from documentation.
+
+### 11. Dev dependencies not installed on fresh `uv sync`
+
+**Symptom:** Ran `uv run ruff check src/` but ruff was not found.
+
+**Root cause:** The project uses `pyproject.toml` with `[project.optional-dependencies]` for dev tools, but `uv sync` only installs core dependencies. Dev extras were not auto-installed.
+
+**Fix:** Ran `uv pip install -e ".[dev]"` to install the editable package with all optional dependencies.
+
+**Lesson:** For projects with optional dependencies, developers need to explicitly install extras or use a dependency group. Consider whether to make certain tools mandatory (in `dependencies`) vs optional (in `optional-dependencies`).
+
 ---
 
-## Remaining work
+## Outstanding gaps (lessons from upstream validation)
 
-See CLAUDE.md § "Pending work". Priority order:
+### Gap 1: Pool pre-ping
 
-1. Integration tests (`tests/integration/`) — requires GDEV1 network access
-2. MCP smoke tests (`tests/run_mcp_tests.py`)
-3. Dockerfile + docker-compose.yml
-4. Fix `Elapsed_Seconds` column name in `transforms.py` `_handle_top_slowest_*` — actual column name in `GCFR_RV_LongestRunProcess` and `GCFR_RV_LongestRunStream` differs; run `SHOW VIEW` to confirm correct name
+**What:** Upstream `Teradata/teradata-mcp-server` uses SQLAlchemy's `pool_pre_ping=True` to test connection liveness before handing to a caller.
+
+**Current state:** We only handle failures after a query fails (reconnect-once pattern).
+
+**Impact:** First query against a stale connection wastes 1 attempt + reconnect overhead. Not critical but suboptimal.
+
+**TODO:** Implement `_test_conn()` in `TDConnectionPool`, call before `yield` in `get_connection()`.
+
+### Gap 2: Request correlation in logs
+
+**What:** Upstream captures request ID in context middleware, propagates through logs for debugging multiplexed queries.
+
+**Current state:** Each tool call is logged independently with no correlation ID.
+
+**Impact:** Hard to trace multiple concurrent tool calls when debugging. Not critical for single-client use but important at scale.
+
+**TODO:** Implement `RequestContextMiddleware` pattern (FastMCP context state → request IDs → log propagation).
+
+### Gap 3: Incomplete YAML placeholder support
+
+**What:** YAML tools can use `{gcfr_opr_db}`, `{gcfr_view_db}`, `{gcfr_utlfw_db}` but not `{gcfr_table_db}`.
+
+**Current state:** `_substitute_placeholders()` in `tool_loader.py` omits the table DB.
+
+**Impact:** Custom YAML tools cannot target physical tables (health checks, direct table queries).
+
+**TODO:** Add `"gcfr_table_db": settings.GCFR_TABLE_DB` to the placeholder dict in `_substitute_placeholders()`.
+
+---

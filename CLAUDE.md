@@ -245,9 +245,79 @@ decorator needed on async test functions.
 
 ---
 
-## Pending work (as of 2026-03-27)
+## Running the server
 
-- `tests/integration/` — live connection tests against GDEV1
-- `tests/run_mcp_tests.py` — MCP protocol smoke tests
-- `Dockerfile` + `docker-compose.yml`
-- Fix `Elapsed_Seconds` column in `transforms.py`: `GCFR_RV_LongestRunProcess` and `GCFR_RV_LongestRunStream` do not have this column — run `SHOW VIEW` against GDEV1 to find the actual elapsed-time column name, then fix `_handle_top_slowest_processes` and `_handle_top_slowest_streams`
+```bash
+# Correct — uses the local project venv
+uv run teradata-gcfr-mcp-server
+
+# With SSE transport (visible stderr output, HTTP on :8000)
+MCP_TRANSPORT=sse uv run teradata-gcfr-mcp-server
+```
+
+**`uvx teradata-gcfr-mcp-server` will fail** — `uvx` resolves from PyPI and this
+package is not published there. Always use `uv run`.
+
+**stdio transport looks frozen** — this is expected. `stdio` mode suppresses all
+stderr output (stdout is the MCP wire protocol). The server is alive and waiting
+for a client to send messages on stdin. Use `MCP_TRANSPORT=sse` when you want
+visible log output during development or manual testing.
+
+---
+
+## Pending work (as of 2026-04-02)
+
+### Fixed (2026-04-02)
+
+- ✅ Query timeout wiring — `GCFR_QUERY_TIMEOUT` now passed to `teradatasql.connect(timeout=...)`
+- ✅ HTTP mount path — `MCP_PATH` now passed to `mcp.run(mount_path=...)`
+
+### Outstanding (priority order)
+
+1. **Pool pre-ping** — Test connection liveness before handing to caller. Currently only reconnect-once on failure. Implement `_test_conn()` and call before `yield` in `get_connection()`.
+
+2. **Request correlation** — Add request IDs to log lines for debugging multiplexed queries. Use `RequestContextMiddleware` pattern from upstream (capture headers, generate IDs, propagate in logs).
+
+3. **{gcfr_table_db} placeholder** — Add `"gcfr_table_db": settings.GCFR_TABLE_DB` to `_substitute_placeholders()` in `tool_loader.py` so custom YAML tools can target physical tables.
+
+4. **Integration tests** (`tests/integration/`) — live connection tests against GDEV1
+
+5. **MCP smoke tests** (`tests/run_mcp_tests.py`) — MCP protocol validation
+
+6. **Dockerfile + docker-compose.yml** — containerization
+
+7. **Fix `Elapsed_Seconds` column** in `transforms.py` — `GCFR_RV_LongestRunProcess` and `GCFR_RV_LongestRunStream` do not have this column; run `SHOW VIEW` against GDEV1 to find actual elapsed-time column name, then update `_handle_top_slowest_processes` and `_handle_top_slowest_streams`
+
+---
+
+## FastMCP API reference (2026-04-02)
+
+### `mcp.run(transport, mount_path=None)`
+
+**Signature:** `mcp.run(transport: Literal["stdio", "sse", "streamable-http"] = "stdio", mount_path: str | None = None) -> None`
+
+**Parameters:**
+- `transport` — MCP wire protocol transport (stdio = stdin/stdout, sse = HTTP SSE, streamable-http = HTTP)
+- `mount_path` — URL path prefix for HTTP transports (e.g., `/mcp/` → `http://host:port/mcp/`)
+
+**Notes:**
+- `MCP_HOST` and `MCP_PORT` settings cannot be changed at runtime — they are FastMCP internals and the framework controls binding. These settings exist for reference but do not affect the actual bind address.
+- Only `mount_path` is configurable post-initialization; transport must be chosen before `main()` returns.
+
+---
+
+## Tool inventory (as of 2026-04-02)
+
+**22 total MCP tools** across 7 categories:
+
+| Category | Count | Tools | Views |
+|---|---|---|---|
+| Streams | 3 | status, current_status, business_date | `GCFR_RV_Stream`, `GCFR_Stream_BusDate` |
+| Processes | 3 | current_status, history, status_summary | `GCFR_RV_Process*` |
+| Loads | 3 | stats, status, dataset_registered | `GCFR_RV_Load*`, `GCFR_RV_DataSetReg` |
+| Transforms | 5 | stats, top_slowest_processes, top_slowest_streams, trend_loads, trend_transforms | `GCFR_RV_Transform`, `GCFR_RV_LongestRun*`, `GCFR_RV_*SumByBusDate` |
+| Errors | 3 | failed_processes, error_log, execution_log | `GCFR_RV_FailedProcessDetail`, `GCFR_Error_Log`, `GCFR_RV_ExecutionLog` |
+| SLA | 2 | process_report, stream_report | `GCFR_RV_SLAProcess`, `GCFR_RV_SLAStream` |
+| Lineage | 2 | data_lineage, health_check | `GCFR_Object_Lineage` (health checks both view DBs) |
+
+---

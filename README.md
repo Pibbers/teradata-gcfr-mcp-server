@@ -19,14 +19,73 @@ slowest streams this week" — without writing SQL.
 
 ---
 
+## How it works
+
+**Server architecture:**
+
+1. **Entry point** (`server.py`) — Initializes the connection pool, registers all tools, applies profile filtering, and starts the MCP server.
+2. **Connection pool** (`db.py`) — Thread-safe pooling of Teradata connections with configurable size, overflow, and timeout. Queries have automatic reconnect-once on transient failures.
+3. **Tool modules** (`tools/*.py`) — 7 categories of MCP tools:
+   - **Streams** (3 tools): Live stream status and business date tracking
+   - **Processes** (3 tools): Process execution history and current status
+   - **Loads** (3 tools): Data ingestion statistics and registration audit
+   - **Transforms** (5 tools): Transform statistics, performance ranking, and trend analysis
+   - **Errors** (3 tools): Error log, execution trace, and failed process diagnostics
+   - **SLA** (2 tools): Service-level agreement compliance reporting
+   - **Lineage** (2 tools): Data lineage tracing and health checks
+4. **Custom tools** (`tool_loader.py`) — YAML-defined SQL tools loaded from `CONFIG_DIR` at startup, allowing site-specific reporting without Python code.
+
+**Query execution:**
+
+- All SQL uses parameterized queries (`?` placeholders) to prevent injection.
+- Schema/table names come from `settings.py` constants, never user input.
+- Per-query timeout enforced via `GCFR_QUERY_TIMEOUT` (default 120s).
+- Queries are capped at `GCFR_MAX_ROWS` (default 500 rows).
+- Results returned as structured error dicts on failure — no exceptions.
+
+**Transport modes:**
+
+| Transport | Best for | Visibility |
+| --- | --- | --- |
+| `stdio` | Claude Desktop, local REPL | Silent (stdout = MCP protocol) |
+| `sse` | Development, debugging, VS Code | Log output on stderr |
+| `streamable-http` | Web dashboards, REST clients | HTTP on configured port/path |
+
+---
+
+## Recent improvements
+
+**Query timeout enforcement** (2025-04-02)
+- `GCFR_QUERY_TIMEOUT` is now wired to `teradatasql.connect()` at connection initialization
+- Queries that exceed the timeout are interrupted at the database level (no more runaway queries)
+- Timeout applies to all tool queries uniformly
+
+**HTTP mount path support** (2025-04-02)
+- `MCP_PATH` setting is now properly passed to FastMCP's `mcp.run()` call
+- HTTP transports now mount at the configured path (e.g., `/mcp/` → `http://127.0.0.1:8001/mcp/`)
+- Enables better URL hierarchy and multi-server configurations
+
+**Connection pool robustness**
+- Automatic reconnect-once on transient failures (stale connections, temporary network issues)
+- QueryBand set on all connections for Teradata workload-management attribution
+- Graceful handling of connection exhaustion with timeout-aware blocking
+
+---
+
 ## Quick start
 
+### Local development (recommended)
+
 ```bash
-uvx teradata-gcfr-mcp-server
+git clone <repo-url>
+cd teradata-gcfr-mcp-server
+uv sync
+cp .env.example .env          # Edit with your Teradata credentials
+MCP_TRANSPORT=sse uv run teradata-gcfr-mcp-server  # Or use stdio for Claude Desktop
 ```
 
-This downloads and runs the server in an isolated environment. For production use, set your
-connection details via environment variables or a `.env` file (see Configuration below).
+The `MCP_TRANSPORT` defaults to `stdio` (for Claude Desktop), but `sse` is useful for debugging
+with visible log output on stderr.
 
 ---
 
@@ -39,14 +98,29 @@ cd teradata-gcfr-mcp-server
 # Install all dependencies including dev extras
 uv sync
 
-# Confirm tests pass before making changes
+# Run linting and type checks before making changes
+uv run ruff check src/
+uv run mypy src/
+
+# Run unit tests (no Teradata connection required)
 uv run pytest tests/unit/ -v
 
-# Run the server locally (stdio transport, reads from .env)
-uv run teradata-gcfr-mcp-server
+# Run the server locally in development mode
+MCP_TRANSPORT=sse uv run teradata-gcfr-mcp-server
 ```
 
-Copy `.env.example` to `.env` and fill in your Teradata credentials before running.
+Copy `.env.example` to `.env` and update with your Teradata credentials. The server will use
+environment variables automatically.
+
+**Verification gate (run before committing):**
+
+All three checks must pass with zero errors:
+
+```bash
+uv run ruff check src/        # Linting
+uv run mypy src/              # Type checking (strict)
+uv run pytest tests/unit/ -v  # Unit tests (76 tests)
+```
 
 ---
 
@@ -66,14 +140,20 @@ All settings are read from environment variables or a `.env` file in the working
 | `GCFR_UTLFW_DB` | str | `GDEV1V_UTLFW` | BKEY/BMAP surrogate-key views |
 | `GCFR_TABLE_DB` | str | `GDEV1T_GCFR` | Physical tables — health-check only |
 | `GCFR_MAX_ROWS` | int | `500` | Maximum rows any single tool may return |
-| `GCFR_QUERY_TIMEOUT` | int | `120` | Per-query timeout in seconds |
+| `GCFR_QUERY_TIMEOUT` | int | `120` | Per-query timeout in seconds (enforced at connection init) |
 | `MCP_TRANSPORT` | str | `stdio` | `stdio` \| `streamable-http` \| `sse` |
-| `MCP_HOST` | str | `127.0.0.1` | Bind host for HTTP/SSE transports |
-| `MCP_PORT` | int | `8001` | Bind port for HTTP/SSE transports |
-| `MCP_PATH` | str | `/mcp/` | URL path prefix for `streamable-http` |
+| `MCP_HOST` | str | `127.0.0.1` | _(read-only)_ Bind host for HTTP/SSE — not configurable at runtime |
+| `MCP_PORT` | int | `8001` | _(read-only)_ Bind port for HTTP/SSE — not configurable at runtime |
+| `MCP_PATH` | str | `/mcp/` | URL path prefix for HTTP transports |
 | `PROFILE` | str | `all` | Active tool profile (see Profiles below) |
 | `LOGGING_LEVEL` | str | `WARNING` | Python logging level |
 | `CONFIG_DIR` | str | `.` | Directory scanned for `*_tools.yml` custom tools |
+
+**Notes on transport configuration:**
+
+- `MCP_HOST` and `MCP_PORT` are FastMCP internal settings and cannot be changed at runtime. The server binds to these values but the MCP framework controls the actual binding. Modify them only if you understand the implications.
+- `MCP_PATH` is properly wired and controls the HTTP mount point (e.g., `/mcp/` → `http://host:port/mcp/`).
+- `GCFR_QUERY_TIMEOUT` is now wired to `teradatasql.connect()`, ensuring all queries respect the configured timeout.
 
 ---
 
@@ -109,6 +189,54 @@ Focused on data lineage and registration audit:
 
 `gcfr_data_lineage`, `gcfr_dataset_registered`, `gcfr_load_stats`,
 `gcfr_transform_stats`, `gcfr_health_check`
+
+---
+
+## Available MCP tools (22 total)
+
+All tools are read-only queries against GCFR operational views. None modify data.
+
+### Streams (3 tools)
+
+- `gcfr_stream_status` — History and completion state for a date range
+- `gcfr_current_stream_status` — Real-time stream status (running now)
+- `gcfr_stream_business_date` — Current, previous, next business date for a stream
+
+### Processes (3 tools)
+
+- `gcfr_process_status_summary` — All processes for a business date (completed vs incomplete)
+- `gcfr_current_process_status` — Real-time process status
+- `gcfr_process_history` — Execution history with timing and outcomes
+
+### Loads (3 tools)
+
+- `gcfr_load_status` — Which staging tables loaded successfully and row counts
+- `gcfr_load_stats` — Detailed load statistics (rejections, ET/UV violations, errors)
+- `gcfr_dataset_registered` — Source datasets registered for processing
+
+### Transforms (5 tools)
+
+- `gcfr_transform_stats` — Rows inserted/updated/deleted per process
+- `gcfr_top_slowest_processes` — Top N slowest processes by elapsed time
+- `gcfr_top_slowest_streams` — Top N slowest streams by elapsed time
+- `gcfr_data_trend_loads` — Daily load volume trends
+- `gcfr_data_trend_transforms` — Daily transform volume trends
+
+### Errors (3 tools)
+
+- `gcfr_failed_processes` — Failed process instances with error details
+- `gcfr_error_log` — Raw error log entries for root cause investigation
+- `gcfr_execution_log` — Step-level execution trace (debug level only)
+
+### SLA (2 tools)
+
+- `gcfr_sla_process_report` — Expected vs actual process timing and SLA compliance
+- `gcfr_sla_stream_report` — Expected vs actual stream duration and SLA compliance
+
+### Lineage (2 tools)
+
+- `gcfr_data_lineage` — Trace target table back to source objects
+- `gcfr_health_check` — Verify GCFR databases are reachable
 
 ---
 
@@ -241,14 +369,13 @@ tools:
 
 **Supported SQL placeholders:**
 
-| Placeholder | Expands to |
-| --- | --- |
-| `{gcfr_opr_db}` | `GCFR_OPR_DB` setting (e.g. `GDEV1V_OPR`) |
-| `{gcfr_view_db}` | `GCFR_VIEW_DB` setting (e.g. `GDEV1V_GCFR`) |
-| `{gcfr_utlfw_db}` | `GCFR_UTLFW_DB` setting (e.g. `GDEV1V_UTLFW`) |
+| Placeholder | Expands to | Purpose |
+| --- | --- | --- |
+| `{gcfr_opr_db}` | `GCFR_OPR_DB` setting | Operational reporting views (`GCFR_RV_*`) |
+| `{gcfr_view_db}` | `GCFR_VIEW_DB` setting | Base registration/metadata views |
+| `{gcfr_utlfw_db}` | `GCFR_UTLFW_DB` setting | BKEY/BMAP surrogate-key reference data |
 
-Custom tools are zero-argument — they run their SQL directly with `GCFR_MAX_ROWS` row limit.
-Tool names must follow the `gcfr_` prefix convention so that profile filtering applies.
+Custom tools are zero-argument — they execute their SQL directly with a `GCFR_MAX_ROWS` row limit applied automatically. Tool names must follow the `gcfr_` prefix convention so that profile filtering and naming conventions are consistent.
 
 ---
 
@@ -311,13 +438,54 @@ uv run pytest tests/unit/ -v -m "not slow"
 
 ---
 
+## Architecture and design patterns
+
+See `CLAUDE.md` in the repository for comprehensive developer documentation including:
+
+- **Async/sync split** — Why MCP tool wrappers are async but DB logic is sync
+- **Dynamic date defaults** — How to avoid frozen dates in function signatures
+- **Parameterised SQL only** — Security model for user input vs schema names
+- **Reconnect-once pattern** — Transient failure handling in the connection pool
+- **TOP clause injection** — Why and how row limits are applied transparently
+- **Testing patterns** — How to mock database calls without hitting Teradata
+- **Custom tool loading** — YAML-driven tool registration and placeholder substitution
+- **Profile filtering** — How role-based access control works at startup
+
+---
+
+## Design validation
+
+This server was validated against the upstream [`Teradata/teradata-mcp-server`](https://github.com/Teradata/teradata-mcp-server)
+for architectural best practices and lessons learned. Key differences:
+
+| Aspect | This server | Upstream |
+| --- | --- | --- |
+| Connection layer | Direct teradatasql | SQLAlchemy + teradatasqlalchemy |
+| DB abstraction | Hand-rolled connection pool | SQLAlchemy QueuePool |
+| Tool registration | Module-based + YAML | Python (auto-discovery) + YAML + progressive disclosure |
+| Async strategy | `asyncio.to_thread` in wrappers | Sync blocking in handlers (thread pool implicit) |
+| Type checking | `mypy --strict` | Gradual mypy (strict disabled) |
+| Testing | 3 per handler (normal/empty/error) | Integration tests against live DB |
+| Error handling | Structured error dicts | Some handlers may raise |
+| Database timeout | ✓ Enforced at connection | Optional SQLAlchemy pool timeout |
+| HTTP path mounting | ✓ Wired to `mcp.run()` | Configuration-only |
+
+Both implementations are production-ready and differ mainly in scope (GCFR-specific vs general Teradata)
+and deployment strategy (lightweight vs feature-rich).
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `OSError: Teradata connection failed` | Wrong host/port in `DATABASE_URI` | Verify host resolves and port 1025 is reachable |
-| `[Error 3524] No access` or similar | Missing `SELECT` grant | Run the `GRANT SELECT ON ...` statements above |
-| Tool returns `{"error": "...", "sql": "..."}` | DB error or timeout | Check `GCFR_QUERY_TIMEOUT`; look at the `sql` field for the failing query |
-| Claude Desktop shows no tools | Server not running or wrong transport | Confirm `MCP_TRANSPORT=stdio` and restart Claude Desktop |
-| `INTERVAL` columns appear as `"0:01:23"` string | Expected — timedelta serialised to string | The `HH:MM:SS` format is correct; parse with `datetime.timedelta` if needed |
-| Custom tools not appearing | Wrong `CONFIG_DIR` or file not named `*_tools.yml` | Set `CONFIG_DIR` to the directory containing your `*_tools.yml` file |
+| `OSError: Teradata connection failed` | Wrong host/port in `DATABASE_URI` | Verify host resolves and port 1025 is reachable; check firewall |
+| `[Error 3524] No access` or permission denied | Missing `SELECT` grant | Run the `GRANT SELECT ON ...` statements in the Required Teradata permissions section |
+| Tool returns `{"error": "...", "sql": "..."}` | Query execution failed or timeout | Check `GCFR_QUERY_TIMEOUT` setting; look at the `sql` field for the failing query; check Teradata error message |
+| Query hangs or times out | `GCFR_QUERY_TIMEOUT` too low or network latency | Increase `GCFR_QUERY_TIMEOUT` in `.env`; default is 120s |
+| Claude Desktop shows no tools | Server not running or wrong transport | Confirm `MCP_TRANSPORT=stdio`; restart Claude Desktop after server starts |
+| SSE transport shows `Connection refused` | Server not running or wrong host/port | Verify server is running with `MCP_TRANSPORT=sse`; check `MCP_HOST` and `MCP_PORT` in `.env` |
+| `INTERVAL` columns appear as `"0:01:23"` string | Expected — Teradata INTERVAL serialized to string | The `HH:MM:SS` format is correct; this is standard JSON serialization of intervals |
+| Custom tools not appearing | Wrong `CONFIG_DIR` or file not named `*_tools.yml` | Set `CONFIG_DIR` to the directory containing your `*_tools.yml` file; restart server |
+| Profile filter not working | Tool name doesn't match pattern | Tool names must start with `gcfr_` to be subject to profile filtering |
+| Server starts but no output | `MCP_TRANSPORT=stdio` silences logs | Use `MCP_TRANSPORT=sse` or `MCP_TRANSPORT=streamable-http` to see startup logs on stderr |
